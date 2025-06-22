@@ -1,0 +1,108 @@
+body {
+  font-family: sans-serif;
+  margin: 0;
+  padding: 0;
+  background: #222;
+  color: white;
+}
+
+#video {
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+}
+
+#camera-container {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  border: 3px solid white;
+  overflow: hidden;
+  cursor: move;
+  box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+}
+
+#camera {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+#resize-handle {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  bottom: 5px;
+  right: 5px;
+  cursor: nwse-resize;
+  background-color: rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+}
+
+#videoSelectBtn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 1.5em;
+  padding: 1em 2em;
+  border-radius: 30px;
+  border: none;
+  background-color: #4A90E2;
+  color: white;
+  cursor: pointer;
+  transition: background-color 0.3s, opacity 0.3s;
+}
+
+#videoSelectBtn:hover {
+  background-color: #357ABD;
+}
+
+#controls {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.5);
+  border-radius: 30px;
+  padding: 10px;
+  display: flex;
+  gap: 15px;
+  transition: opacity 0.3s;
+}
+
+#controls button {
+  background: none;
+  border: 2px solid white;
+  color: white;
+  border-radius: 50%;
+  width: 55px;
+  height: 55px;
+  font-size: 1.2em;
+  cursor: pointer;
+  transition: background-color 0.3s, transform 0.2s;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#controls button:hover {
+  background: rgba(255,255,255,0.2);
+  transform: scale(1.1);
+}
+
+#controls button:disabled {
+  color: #888;
+  border-color: #888;
+  cursor: not-allowed;
+  transform: none;
+  background: none;
+}
+
+.hidden {
+  display: none !important;
+} 

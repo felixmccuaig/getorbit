@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+    <title>Orbit</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <video id="video" autoplay></video>
+
+    <div id="camera-container">
+      <video id="camera" autoplay muted></video>
+      <div id="resize-handle"></div>
+    </div>
+
+    <button id="videoSelectBtn">Select Source</button>
+
+    <canvas id="canvas" class="hidden"></canvas>
+
+    <script src="renderer.js"></script>
+  </body>
+</html> 

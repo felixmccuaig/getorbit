@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Camera</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
+            -webkit-app-region: drag;
+            width: 200px;
+            height: 200px;
+        }
+        
+        #camera-container {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 3px solid white;
+            overflow: hidden;
+            cursor: move;
+            position: relative;
+            box-sizing: border-box;
+        }
+        
+        #camera {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #resize-handle {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            bottom: 5px;
+            right: 5px;
+            cursor: nwse-resize;
+            background-color: rgba(255, 255, 255, 0.4);
+            border-radius: 50%;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            -webkit-app-region: no-drag;
+        }
+
+        .recording-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 12px;
+            height: 12px;
+            background: #ff4444;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div id="camera-container">
+        <video id="camera" autoplay muted></video>
+        <div id="resize-handle"></div>
+        <div id="recording-indicator" class="recording-indicator" style="display: none;"></div>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+        const { dialog } = require('@electron/remote');
+        const { writeFile } = require('fs');
+        
+        const cameraContainer = document.getElementById('camera-container');
+        const cameraElement = document.getElementById('camera');
+        const resizeHandle = document.getElementById('resize-handle');
+        const recordingIndicator = document.getElementById('recording-indicator');
+        
+        let cameraStream = null;
+        let screenStream = null;
+        let micStream = null;
+        let screenRecorder = null;
+        let cameraRecorder = null;
+        let screenChunks = [];
+        let cameraChunks = [];
+        let isRecording = false;
+        let isProcessing = false; // Prevent multiple processing attempts
+        let cameraPosition = null; // Store camera position for post-processing
+        let stopScreenPromise, resolveScreenStop;
+        let stopCameraPromise, resolveCameraStop;
+
+        // Make camera draggable
+        cameraContainer.onmousedown = (e) => {
+            if (e.target === resizeHandle) return; // Don't drag when resizing
+            
+            e.preventDefault();
+            const currentWindow = require('@electron/remote').getCurrentWindow();
+            const windowBounds = currentWindow.getBounds();
+            
+            let offsetX = e.clientX;
+            let offsetY = e.clientY;
+
+            function move(e) {
+                const newX = windowBounds.x + (e.clientX - offsetX);
+                const newY = windowBounds.y + (e.clientY - offsetY);
+                
+                const { screen } = require('electron');
+                const display = screen.getDisplayNearestPoint({ x: newX, y: newY });
+                const maxX = display.workArea.x + display.workArea.width - windowBounds.width;
+                const maxY = display.workArea.y + display.workArea.height - windowBounds.height;
+                
+                currentWindow.setPosition(
+                    Math.max(display.workArea.x, Math.min(maxX, newX)),
+                    Math.max(display.workArea.y, Math.min(maxY, newY))
+                );
+            }
+
+            function up() {
+                window.removeEventListener('mousemove', move);
+                window.removeEventListener('mouseup', up);
+            }
+
+            window.addEventListener('mousemove', move);
+            window.addEventListener('mouseup', up);
+        };
+
+        // Make camera resizable
+        resizeHandle.onmousedown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const startSize = cameraContainer.offsetWidth;
+            const startX = e.clientX;
+
+            function doResize(e) {
+                const deltaX = e.clientX - startX;
+                const newSize = Math.max(100, Math.min(400, startSize + deltaX));
+                
+                document.body.style.width = newSize + 'px';
+                document.body.style.height = newSize + 'px';
+                
+                require('@electron/remote').getCurrentWindow().setSize(newSize, newSize);
+            }
+
+            function stopResize() {
+                window.removeEventListener('mousemove', doResize);
+                window.removeEventListener('mouseup', stopResize);
+            }
+
+            window.addEventListener('mousemove', doResize);
+            window.addEventListener('mouseup', stopResize);
+        };
+
+        ipcRenderer.on('start-preview', async () => {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                
+                if (videoDevices.length > 0) {
+                    cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: { 
+                            deviceId: { exact: videoDevices[0].deviceId },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 30 }
+                        },
+                        audio: false
+                    });
+                    cameraElement.srcObject = cameraStream;
+                }
+            } catch (error) {
+                console.error('Error starting camera preview:', error);
+            }
+        });
+
+        ipcRenderer.on('start-camera', async (event, data) => {
+            try {
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => track.stop());
+                }
+                
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { 
+                        deviceId: { exact: data.cameraId },
+                        width: { ideal: 1920 },
+                        height: { ideal: 1080 },
+                        frameRate: { ideal: 30 }
+                    },
+                    audio: false
+                });
+                cameraElement.srcObject = cameraStream;
+                console.log('Camera started successfully');
+            } catch (error) {
+                console.error('Error starting camera:', error);
+            }
+        });
+
+        ipcRenderer.on('start-recording', async (event, data) => {
+            console.log('Received start-recording event:', data);
+            recordingIndicator.style.display = 'block';
+            isRecording = true;
+            isProcessing = false;
+            
+            try {
+                const currentWindow = require('@electron/remote').getCurrentWindow();
+                const windowBounds = currentWindow.getBounds();
+                cameraPosition = {
+                    x: windowBounds.x,
+                    y: windowBounds.y,
+                    size: windowBounds.width
+                };
+                console.log('Camera position stored:', cameraPosition);
+                
+                const sources = await ipcRenderer.invoke('get-sources');
+                const selectedSource = sources.find(source => source.id === data.windowId);
+                
+                if (selectedSource) {
+                    screenStream = await navigator.mediaDevices.getUserMedia({
+                        audio: false,
+                        video: {
+                            mandatory: {
+                                chromeMediaSource: 'desktop',
+                                chromeMediaSourceId: selectedSource.id
+                            }
+                        }
+                    });
+                    
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: { deviceId: data.micId === 'default' ? 'default' : { exact: data.micId } }
+                    });
+
+                    startSeparateRecording();
+                } else {
+                    console.error('Selected source not found:', data.windowId);
+                }
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                recordingIndicator.style.display = 'none';
+                isRecording = false;
+            }
+        });
+
+        ipcRenderer.on('stop-recording', async () => {
+            console.log('Stop recording event received');
+            recordingIndicator.style.display = 'none';
+            isRecording = false;
+        
+            if (screenRecorder && screenRecorder.state === 'recording') {
+                screenRecorder.stop();
+            } else {
+                if (resolveScreenStop) resolveScreenStop();
+            }
+        
+            if (cameraRecorder && cameraRecorder.state === 'recording') {
+                cameraRecorder.stop();
+            } else {
+                if (resolveCameraStop) resolveCameraStop();
+            }
+        
+            console.log('Waiting for recordings to stop...');
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Stop recording timeout')), 5000)
+            );
+        
+            try {
+                await Promise.race([
+                    Promise.all([stopScreenPromise, stopCameraPromise]),
+                    timeoutPromise
+                ]);
+                console.log('Both recorders have stopped.');
+            } catch (error) {
+                console.error('Error waiting for recorders to stop:', error.message);
+                console.log('Forcing processing with available chunks...');
+            }
+
+            await processRecording();
+            
+            // Clean up all media streams
+            cleanupStreams();
+            
+            ipcRenderer.send('recording-stopped');
+        });
+
+        ipcRenderer.on('controls-closing', () => {
+            console.log('Controls window is closing - shutting down all camera streams');
+            
+            // Stop any active recording immediately
+            if (isRecording) {
+                recordingIndicator.style.display = 'none';
+                isRecording = false;
+                
+                if (screenRecorder && screenRecorder.state === 'recording') {
+                    screenRecorder.stop();
+                }
+                if (cameraRecorder && cameraRecorder.state === 'recording') {
+                    cameraRecorder.stop();
+                }
+            }
+            
+            // Force cleanup of ALL streams including camera preview
+            forceCleanupAllStreams();
+        });
+
+        // Add a new event to restart camera preview when window is shown again
+        ipcRenderer.on('restart-camera-preview', async () => {
+            console.log('Restarting camera preview...');
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(d => d.kind === 'videoinput');
+                
+                if (videoDevices.length > 0) {
+                    cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: { 
+                            deviceId: { exact: videoDevices[0].deviceId },
+                            width: { ideal: 1920 },
+                            height: { ideal: 1080 },
+                            frameRate: { ideal: 30 }
+                        },
+                        audio: false
+                    });
+                    cameraElement.srcObject = cameraStream;
+                    console.log('Camera preview restarted successfully');
+                }
+            } catch (error) {
+                console.error('Error restarting camera preview:', error);
+            }
+        });
+
+        function startSeparateRecording() {
+            console.log('Starting separate recording...');
+            
+            stopScreenPromise = new Promise(resolve => { resolveScreenStop = resolve; });
+            stopCameraPromise = new Promise(resolve => { resolveCameraStop = resolve; });
+            
+            screenChunks = [];
+            cameraChunks = [];
+            
+            const screenStreamWithAudio = new MediaStream([...screenStream.getVideoTracks(), ...micStream.getAudioTracks()]);
+            
+            const screenOptions = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: 8000000 };
+            if (!MediaRecorder.isTypeSupported(screenOptions.mimeType)) {
+                screenOptions.mimeType = 'video/webm; codecs=vp8';
+                screenOptions.videoBitsPerSecond = 5000000;
+            }
+            
+            screenRecorder = new MediaRecorder(screenStreamWithAudio, screenOptions);
+            screenRecorder.ondataavailable = e => { if (e.data.size > 0) screenChunks.push(e.data); };
+            screenRecorder.onstop = () => { console.log('Screen recording stopped.'); if (resolveScreenStop) resolveScreenStop(); };
+            screenRecorder.onerror = e => { console.error('Screen recorder error:', e); if (resolveScreenStop) resolveScreenStop(); };
+            
+            const cameraOptions = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: 2000000 };
+            if (!MediaRecorder.isTypeSupported(cameraOptions.mimeType)) {
+                cameraOptions.mimeType = 'video/webm; codecs=vp8';
+                cameraOptions.videoBitsPerSecond = 1000000;
+            }
+            
+            cameraRecorder = new MediaRecorder(cameraStream, cameraOptions);
+            cameraRecorder.ondataavailable = e => { if (e.data.size > 0) cameraChunks.push(e.data); };
+            cameraRecorder.onstop = () => { console.log('Camera recording stopped.'); if (resolveCameraStop) resolveCameraStop(); };
+            cameraRecorder.onerror = e => { console.error('Camera recorder error:', e); if (resolveCameraStop) resolveCameraStop(); };
+            
+            screenRecorder.start(100);
+            cameraRecorder.start(100);
+            
+            console.log('Both recordings started successfully');
+            ipcRenderer.send('recording-started');
+        }
+
+        function cleanupStreams() {
+            console.log('Cleaning up media streams...');
+            
+            try {
+                // Stop all tracks in screen stream
+                if (screenStream) {
+                    screenStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Stopped screen track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping screen track:', error);
+                        }
+                    });
+                    screenStream = null;
+                }
+                
+                // Stop all tracks in microphone stream
+                if (micStream) {
+                    micStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Stopped mic track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping mic track:', error);
+                        }
+                    });
+                    micStream = null;
+                }
+                
+                // Camera stream is kept running for preview, but we ensure it's clean
+                if (cameraStream && !cameraElement.srcObject) {
+                    cameraStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Stopped camera track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping camera track:', error);
+                        }
+                    });
+                    cameraStream = null;
+                }
+                
+                console.log('Media streams cleanup complete');
+            } catch (error) {
+                console.error('Error during cleanup:', error);
+            }
+        }
+
+        function forceCleanupAllStreams() {
+            console.log('Force cleaning up ALL media streams including camera preview...');
+            
+            try {
+                // Stop all tracks in screen stream
+                if (screenStream) {
+                    screenStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Force stopped screen track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping screen track:', error);
+                        }
+                    });
+                    screenStream = null;
+                }
+                
+                // Stop all tracks in microphone stream
+                if (micStream) {
+                    micStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Force stopped mic track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping mic track:', error);
+                        }
+                    });
+                    micStream = null;
+                }
+                
+                // Stop ALL camera tracks including preview
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => {
+                        try {
+                            track.stop();
+                            console.log('Force stopped camera track:', track.kind);
+                        } catch (error) {
+                            console.error('Error stopping camera track:', error);
+                        }
+                    });
+                    cameraStream = null;
+                }
+                
+                // Remove the stream from the video element
+                try {
+                    cameraElement.srcObject = null;
+                } catch (error) {
+                    console.error('Error clearing camera element:', error);
+                }
+                
+                console.log('Force cleanup of all media streams complete');
+            } catch (error) {
+                console.error('Error during force cleanup:', error);
+            }
+        }
+
+        async function processRecording() {
+            if (isProcessing) return;
+            isProcessing = true;
+            
+            console.log('Processing recording...');
+            
+            if (screenChunks.length === 0) {
+                console.error('No screen recording data');
+                isProcessing = false;
+                return;
+            }
+            
+            if (cameraChunks.length === 0) {
+                console.warn('No camera recording data, saving screen only.');
+                await saveScreenOnly();
+                isProcessing = false;
+                return;
+            }
+            
+            await compositeVideos();
+            isProcessing = false;
+        }
+
+        async function compositeVideos() {
+            try {
+                const screenBlob = new Blob(screenChunks, { type: 'video/webm' });
+                const cameraBlob = new Blob(cameraChunks, { type: 'video/webm' });
+                
+                const screenVideo = document.createElement('video');
+                const cameraVideo = document.createElement('video');
+                
+                screenVideo.src = URL.createObjectURL(screenBlob);
+                cameraVideo.src = URL.createObjectURL(cameraBlob);
+                
+                await Promise.all([
+                    new Promise(r => { screenVideo.onloadedmetadata = r; screenVideo.load(); }),
+                    new Promise(r => { cameraVideo.onloadedmetadata = r; cameraVideo.load(); })
+                ]);
+
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = screenVideo.videoWidth;
+                canvas.height = screenVideo.videoHeight;
+                
+                const cameraSize = Math.min(200, canvas.width / 6);
+                const margin = 20;
+                const cameraX = canvas.width - cameraSize - margin;
+                const cameraY = canvas.height - cameraSize - margin;
+                
+                await startCompositing(screenVideo, cameraVideo, canvas, ctx, cameraX, cameraY, cameraSize);
+                
+                URL.revokeObjectURL(screenVideo.src);
+                URL.revokeObjectURL(cameraVideo.src);
+                
+            } catch (error) {
+                console.error('Error in compositeVideos:', error);
+                await saveScreenRecording();
+                await saveCameraRecording();
+            }
+        }
+
+        async function startCompositing(screenVideo, cameraVideo, canvas, ctx, cameraX, cameraY, cameraSize) {
+            const canvasStream = canvas.captureStream(30);
+            const audioContext = new AudioContext();
+            const screenAudioSource = audioContext.createMediaElementSource(screenVideo);
+            const destination = audioContext.createMediaStreamDestination();
+            screenAudioSource.connect(destination);
+            
+            const combinedStream = new MediaStream([canvasStream.getVideoTracks()[0], destination.stream.getAudioTracks()[0]]);
+            
+            const compositeChunks = [];
+            const recorderOptions = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: 8000000 };
+            if (!MediaRecorder.isTypeSupported(recorderOptions.mimeType)) {
+                recorderOptions.mimeType = 'video/webm; codecs=vp8';
+                recorderOptions.videoBitsPerSecond = 5000000;
+            }
+            
+            const compositeRecorder = new MediaRecorder(combinedStream, recorderOptions);
+            compositeRecorder.ondataavailable = e => { if (e.data.size > 0) compositeChunks.push(e.data); };
+            compositeRecorder.onstop = async () => {
+                await saveCompositeVideo(compositeChunks);
+                audioContext.close();
+            };
+            
+            compositeRecorder.start();
+            
+            screenVideo.currentTime = 0;
+            cameraVideo.currentTime = 0;
+            await screenVideo.play();
+            await cameraVideo.play();
+            
+            const duration = Math.min(screenVideo.duration, cameraVideo.duration);
+            drawCompositeFrame(screenVideo, cameraVideo, ctx, canvas, cameraX, cameraY, cameraSize, compositeRecorder, duration);
+        }
+
+        function drawCompositeFrame(screenVideo, cameraVideo, ctx, canvas, cameraX, cameraY, cameraSize, recorder, duration) {
+            try {
+                if (screenVideo.readyState < 2 || cameraVideo.readyState < 2) {
+                    if (!screenVideo.ended) requestAnimationFrame(() => drawCompositeFrame(...arguments));
+                    return;
+                }
+                
+                ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
+                
+                if (cameraVideo.videoWidth > 0) {
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.arc(cameraX + cameraSize / 2, cameraY + cameraSize / 2, cameraSize / 2, 0, Math.PI * 2);
+                    ctx.clip();
+                    
+                    const camRatio = cameraVideo.videoWidth / cameraVideo.videoHeight;
+                    const sWidth = camRatio > 1 ? cameraVideo.videoHeight : cameraVideo.videoWidth;
+                    const sHeight = sWidth;
+                    const sx = (cameraVideo.videoWidth - sWidth) / 2;
+                    const sy = (cameraVideo.videoHeight - sHeight) / 2;
+                    
+                    ctx.drawImage(cameraVideo, sx, sy, sWidth, sHeight, cameraX, cameraY, cameraSize, cameraSize);
+                    ctx.restore();
+                    
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.arc(cameraX + cameraSize / 2, cameraY + cameraSize / 2, cameraSize / 2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                
+                if (!screenVideo.ended && screenVideo.currentTime < duration) {
+                    requestAnimationFrame(() => drawCompositeFrame(...arguments));
+                } else {
+                    recorder.stop();
+                }
+            } catch (error) {
+                console.error('Error in drawCompositeFrame:', error);
+                recorder.stop();
+            }
+        }
+
+        async function saveCompositeVideo(chunks) {
+            if (chunks.length === 0) return console.error('No composite video data to save');
+            
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            
+            const { filePath } = await dialog.showSaveDialog({
+                buttonLabel: 'Save Composite Video',
+                defaultPath: `orbit-composite-${Date.now()}.webm`
+            });
+            
+            if (filePath) {
+                writeFile(filePath, buffer, (err) => {
+                    if (err) console.error('Error saving composite video:', err);
+                    else console.log('🎉 Recording complete! Your video includes the camera bubble overlay.');
+                });
+            }
+        }
+
+        async function saveScreenOnly() {
+            const blob = new Blob(screenChunks, { type: 'video/webm' });
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            
+            const timestamp = Date.now();
+            const { filePath } = await dialog.showSaveDialog({
+                buttonLabel: 'Save Screen Recording',
+                defaultPath: `orbit-screen-only-${timestamp}.webm`,
+                filters: [
+                    { name: 'WebM Videos', extensions: ['webm'] }
+                ]
+            });
+            
+            if (filePath) {
+                writeFile(filePath, buffer, (err) => {
+                    if (err) {
+                        console.error('Error saving screen recording:', err);
+                    } else {
+                        console.log('Screen recording saved to:', filePath);
+                    }
+                });
+            }
+        }
+
+        async function saveScreenRecording() {
+            const blob = new Blob(screenChunks, { type: 'video/webm' });
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            
+            const timestamp = Date.now();
+            const { filePath } = await dialog.showSaveDialog({
+                buttonLabel: 'Save Screen Recording',
+                defaultPath: `orbit-screen-${timestamp}.webm`,
+                filters: [
+                    { name: 'WebM Videos', extensions: ['webm'] }
+                ]
+            });
+            
+            if (filePath) {
+                writeFile(filePath, buffer, (err) => {
+                    if (err) {
+                        console.error('Error saving screen recording:', err);
+                    } else {
+                        console.log('Screen recording saved to:', filePath);
+                    }
+                });
+            }
+        }
+
+        async function saveCameraRecording() {
+            const blob = new Blob(cameraChunks, { type: 'video/webm' });
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            
+            const timestamp = Date.now();
+            const { filePath } = await dialog.showSaveDialog({
+                buttonLabel: 'Save Camera Recording',
+                defaultPath: `orbit-camera-${timestamp}.webm`,
+                filters: [
+                    { name: 'WebM Videos', extensions: ['webm'] }
+                ]
+            });
+            
+            if (filePath) {
+                writeFile(filePath, buffer, (err) => {
+                    if (err) {
+                        console.error('Error saving camera recording:', err);
+                    } else {
+                        console.log('Camera recording saved to:', filePath);
+                    }
+                });
+            }
+        }
+
+        // Handle window closing
+        window.addEventListener('beforeunload', () => {
+            console.log('Camera window is closing, cleaning up...');
+            if (isRecording) {
+                // If still recording, stop everything
+                if (screenRecorder && screenRecorder.state === 'recording') {
+                    screenRecorder.stop();
+                }
+                if (cameraRecorder && cameraRecorder.state === 'recording') {
+                    cameraRecorder.stop();
+                }
+            }
+            // Force cleanup of all streams including camera preview
+            forceCleanupAllStreams();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if ((e.metaKey && e.altKey && e.key === 'i') || (e.ctrlKey && e.shiftKey && e.key === 'I')) {
+                require('@electron/remote').getCurrentWindow().webContents.openDevTools();
+            }
+        });
+    </script>
+</body>
+</html> 

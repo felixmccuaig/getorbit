@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Orbit</title>
+    <link rel="stylesheet" href="controls.css">
+</head>
+<body>
+    <div id="controls-container">
+        <!-- Header with close button -->
+        <div id="header">
+            <button id="close-btn">×</button>
+        </div>
+
+        <!-- Window Selection -->
+        <div id="window-section" class="section">
+            <div class="section-header" id="window-header">
+                <span class="icon">🖥</span>
+                <span class="label" id="window-label">Select window or screen</span>
+                <span class="dropdown-arrow">▼</span>
+            </div>
+        </div>
+
+        <!-- Camera Selection -->
+        <div id="camera-section" class="section">
+            <div class="section-header">
+                <span class="icon">📹</span>
+                <span class="label">Camera</span>
+                <span id="camera-status" class="status">Off</span>
+            </div>
+            <div id="camera-list" class="options-list hidden">
+                <!-- Cameras will be populated here -->
+            </div>
+        </div>
+
+        <!-- Microphone Selection -->
+        <div id="mic-section" class="section">
+            <div class="section-header">
+                <span class="icon">🎤</span>
+                <span class="label">Microphone</span>
+                <span id="mic-status" class="status">Off</span>
+            </div>
+            <div id="mic-list" class="options-list hidden">
+                <!-- Microphones will be populated here -->
+            </div>
+        </div>
+
+        <!-- Start Recording Button -->
+        <button id="start-recording" class="start-btn" disabled>
+            Start recording
+        </button>
+
+        <!-- Stop Recording Button (hidden initially) -->
+        <button id="stop-recording" class="stop-btn hidden">
+            Stop recording
+        </button>
+    </div>
+
+    <script src="controlsRenderer.js"></script>
+</body>
+</html> 

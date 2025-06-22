@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="orbitGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4A90E2"/>
+      <stop offset="100%" stop-color="#9013FE"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer orbit ring -->
+  <ellipse
+    cx="32" cy="32"
+    rx="28" ry="10"
+    fill="none"
+    stroke="url(#orbitGradient)"
+    stroke-width="4"
+    transform="rotate(45 32 32)"
+  />
+  <!-- Central record button -->
+  <circle
+    cx="32" cy="32"
+    r="12"
+    fill="url(#orbitGradient)"
+  />
+</svg>

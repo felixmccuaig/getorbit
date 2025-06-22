@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Select Window</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: transparent;
+            -webkit-app-region: drag;
+        }
+
+        #selector-container {
+            background: #f8f9fa;
+            border-radius: 20px;
+            width: 580px;
+            padding: 0;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            border: 1px solid rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        #header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            background: white;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        #title {
+            font-weight: 600;
+            color: #333;
+            font-size: 16px;
+        }
+
+        #close-btn {
+            -webkit-app-region: no-drag;
+            background: none;
+            border: none;
+            font-size: 20px;
+            color: #6c757d;
+            cursor: pointer;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #close-btn:hover {
+            background: #f8f9fa;
+        }
+
+        #window-list {
+            padding: 16px 20px;
+        }
+
+        #window-items {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+
+        .window-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            cursor: pointer;
+            border-radius: 12px;
+            margin-bottom: 8px;
+            -webkit-app-region: no-drag;
+            transition: background 0.2s;
+            background: white;
+            border: 1px solid #e9ecef;
+        }
+
+        .window-item:hover {
+            background: #f8f9fa;
+        }
+
+        .window-item.selected {
+            background: #e3f2fd;
+            border-color: #2196f3;
+        }
+
+        .window-icon {
+            font-size: 20px;
+            width: 24px;
+            text-align: center;
+        }
+
+        .window-info {
+            flex: 1;
+        }
+
+        .window-name {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 2px;
+        }
+
+        .window-type {
+            font-size: 12px;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <div id="selector-container">
+        <div id="header">
+            <div id="title">Select window or screen</div>
+            <button id="close-btn">×</button>
+        </div>
+        
+        <!-- Window list -->
+        <div id="window-list">
+            <div id="window-items">
+                <!-- Windows will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+        
+        const closeBtn = document.getElementById('close-btn');
+        const windowItems = document.getElementById('window-items');
+        
+        closeBtn.onclick = () => {
+            ipcRenderer.send('hide-window-selector');
+        };
+        
+        async function loadWindows() {
+            try {
+                const sources = await ipcRenderer.invoke('get-sources');
+                windowItems.innerHTML = '';
+                
+                sources.forEach(source => {
+                    const item = document.createElement('div');
+                    item.className = 'window-item';
+                    
+                    const isScreen = source.id.startsWith('screen');
+                    const icon = isScreen ? '🖥️' : '🪟';
+                    const type = isScreen ? 'Screen' : 'Window';
+                    
+                    item.innerHTML = `
+                        <div class="window-icon">${icon}</div>
+                        <div class="window-info">
+                            <div class="window-name">${source.name}</div>
+                            <div class="window-type">${type}</div>
+                        </div>
+                    `;
+                    
+                    item.onclick = () => {
+                        // Remove previous selection
+                        windowItems.querySelectorAll('.window-item').forEach(el => el.classList.remove('selected'));
+                        // Select this item
+                        item.classList.add('selected');
+                        
+                        // Send selection back to main process
+                        ipcRenderer.send('window-selected', {
+                            id: source.id,
+                            name: source.name,
+                            type: type
+                        });
+                    };
+                    
+                    windowItems.appendChild(item);
+                });
+            } catch (error) {
+                console.error('Error loading windows:', error);
+            }
+        }
+        
+        // Handle escape key to close
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                ipcRenderer.send('hide-window-selector');
+            }
+        });
+        
+        // Load windows when the page loads
+        window.onload = loadWindows;
+    </script>
+</body>
+</html> 

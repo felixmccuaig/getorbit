@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, Menu, desktopCapturer, Tray } = require('electron');
 const path = require('path');
+const { windowManager } = require('node-window-manager');
 
 require('@electron/remote/main').initialize();
 
@@ -7,6 +8,7 @@ let tray;
 let controlsWindow;
 let windowSelectorWindow;
 let cameraWindow;
+let recordingWindow;
 let isRecording = false;
 let recordingData = null;
 
@@ -82,15 +84,21 @@ ipcMain.on('hide-window-selector', () => {
   }
 });
 
-ipcMain.on('window-selected', (event, windowData) => {
+ipcMain.on('window-selected', async (event, windowData) => {
+  console.log('Window selected:', windowData);
+  
   // Forward the selection back to the controls window
   if (controlsWindow && !controlsWindow.isDestroyed()) {
     controlsWindow.webContents.send('window-selected', windowData);
   }
+  
   // Hide the selector window
   if (windowSelectorWindow && !windowSelectorWindow.isDestroyed()) {
     windowSelectorWindow.hide();
   }
+  
+  // Immediately show the recording outline around the selected window
+  await showRecordingOutline(windowData);
 });
 
 ipcMain.on('recording-started', () => {
@@ -102,13 +110,13 @@ ipcMain.on('recording-started', () => {
 });
 
 ipcMain.on('recording-stopped', () => {
-  console.log('Recording stopped event received from camera');
+  console.log('Recording stopped event received from recording overlay');
   isRecording = false;
   recordingData = null;
   
-  // Hide camera window after recording stops
-  if (cameraWindow && !cameraWindow.isDestroyed()) {
-    cameraWindow.hide();
+  // Hide recording overlay after recording stops
+  if (recordingWindow && !recordingWindow.isDestroyed()) {
+    recordingWindow.hide();
   }
   
   // Update controls UI to show stopped state
@@ -116,7 +124,40 @@ ipcMain.on('recording-stopped', () => {
     controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
   }
   
-  console.log('Recording stopped and cleaned up');
+  console.log('Area recording stopped and cleaned up');
+});
+
+// Handle user stopping recording from within the recording overlay
+ipcMain.on('user-stop-recording', () => {
+  console.log('User requested stop recording from recording overlay');
+  stopRecording();
+});
+
+// Handle recording errors
+ipcMain.on('recording-error', (event, errorMessage) => {
+  console.error('Recording error:', errorMessage);
+  isRecording = false;
+  recordingData = null;
+  
+  // Hide recording overlay
+  if (recordingWindow && !recordingWindow.isDestroyed()) {
+    recordingWindow.hide();
+  }
+  
+  // Update controls UI to show stopped state
+  if (controlsWindow && !controlsWindow.isDestroyed()) {
+    controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
+  }
+});
+
+// Handle recording saved successfully
+ipcMain.on('recording-saved', (event, filePath) => {
+  console.log('Recording saved successfully to:', filePath);
+});
+
+// Handle camera position updates from recording area drag/resize
+ipcMain.on('update-camera-position', (event, bounds) => {
+  moveCameraToRecordingArea(bounds);
 });
 
 function createTray() {
@@ -221,7 +262,12 @@ function createControlsWindow() {
       stopRecording();
     }
     
-    // Send shutdown signal to camera window to stop all streams
+    // Close the recording overlay if it's open
+    if (recordingWindow && !recordingWindow.isDestroyed()) {
+      recordingWindow.close();
+    }
+    
+    // Send shutdown signal to camera window to stop all streams (for preview mode)
     if (cameraWindow && !cameraWindow.isDestroyed()) {
       cameraWindow.webContents.send('controls-closing');
     }
@@ -350,82 +396,185 @@ function createCameraWindow() {
   return cameraWindow;
 }
 
-function startRecording(data) {
-  console.log('Starting recording with data:', data);
-  recordingData = data;
-  isRecording = true;
+function createRecordingWindow() {
+  const { screen } = require('electron');
+  const displays = screen.getAllDisplays();
+  const union = displays.reduce((acc, d) => {
+    const b = d.bounds;
+    const minX = Math.min(acc.minX, b.x);
+    const minY = Math.min(acc.minY, b.y);
+    const maxX = Math.max(acc.maxX, b.x + b.width);
+    const maxY = Math.max(acc.maxY, b.y + b.height);
+    return { minX, minY, maxX, maxY };
+  }, { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+
+  const totalWidth = union.maxX - union.minX;
+  const totalHeight = union.maxY - union.minY;
+
+  recordingWindow = new BrowserWindow({
+    width: totalWidth,
+    height: totalHeight,
+    x: union.minX,
+    y: union.minY,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    show: false,
+    fullscreen: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    }
+  });
+
+  require('@electron/remote/main').enable(recordingWindow.webContents);
+  recordingWindow.loadFile('recordingWindow.html');
   
-  // Create camera window if it doesn't exist
-  if (!cameraWindow) {
-    createCameraWindow();
+  recordingWindow.on('closed', () => {
+    recordingWindow = null;
+  });
+  
+  return recordingWindow;
+}
+
+async function getActualWindowBounds(windowData) {
+  try {
+    // Try using node-window-manager for precise bounds
+    const winIdMatch = windowData.id.match(/window:(\d+):/);
+    let targetBounds = null;
+    if (winIdMatch) {
+      const nativeId = parseInt(winIdMatch[1], 10);
+      const allWins = windowManager.getWindows();
+      const targetWin = allWins.find(w => w.id === nativeId);
+      if (targetWin) {
+        const b = targetWin.getBounds();
+        // node-window-manager already returns coordinates with origin at top-left
+        targetBounds = { x: b.x, y: b.y, width: b.width, height: b.height };
+        // Keep negative coordinates (secondary displays) as-is
+      }
+    }
+
+    // Fallback: if it's a full screen capture (screen:id)
+    if (!targetBounds && windowData.id.startsWith('screen')) {
+      const displayId = windowData.id.split(':')[1];
+      const { screen } = require('electron');
+      const displays = screen.getAllDisplays();
+      const targetDisplay = displays.find(d => d.id.toString() === displayId);
+      if (targetDisplay) {
+        targetBounds = {
+          x: targetDisplay.bounds.x,
+          y: targetDisplay.bounds.y,
+          width: targetDisplay.bounds.width,
+          height: targetDisplay.bounds.height,
+        };
+      }
+    }
+
+    if (targetBounds) return targetBounds;
+  } catch (e) {
+    console.warn('node-window-manager bounds failed:', e.message);
+  }
+  // Fallback smart estimate (center of primary display)
+  const { screen } = require('electron');
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { width, height } = primaryDisplay.workAreaSize;
+  const windowWidth = Math.min(Math.floor(width * 0.6), 1200);
+  const windowHeight = Math.min(Math.floor(height * 0.7), 800);
+  return {
+    x: Math.floor((width - windowWidth) / 2),
+    y: Math.floor((height - windowHeight) / 2),
+    width: windowWidth,
+    height: windowHeight,
+  };
+}
+
+async function showRecordingOutline(windowData) {
+  console.log('Showing recording outline for:', windowData);
+  
+  // Create recording window if needed
+  if (!recordingWindow || recordingWindow.isDestroyed()) {
+    console.log('Creating new recording window for outline...');
+    createRecordingWindow();
   }
   
-  // Make sure camera window is ready before sending events
-  if (cameraWindow.webContents.isLoading()) {
-    cameraWindow.webContents.once('did-finish-load', () => {
-      console.log('Camera window loaded, starting recording...');
-      startRecordingProcess(data);
-    });
+  // Get the actual bounds of the selected window
+  const bounds = await getActualWindowBounds(windowData);
+  console.log('Using bounds for outline:', bounds);
+  
+  // Show recording window and position outline
+  recordingWindow.show();
+  
+  // Move the existing camera window to the recording area
+  moveCameraToRecordingArea(bounds);
+  
+  const sendOutlineEvents = () => {
+    console.log('Sending outline positioning to recording window');
+    recordingWindow.webContents.send('position-recording-area', bounds);
+    recordingWindow.webContents.send('show-outline-only'); // New event to show just outline
+  };
+  
+  if (recordingWindow.webContents.isLoading()) {
+    recordingWindow.webContents.once('did-finish-load', sendOutlineEvents);
   } else {
-    startRecordingProcess(data);
+    sendOutlineEvents();
   }
 }
 
-function startRecordingProcess(data) {
-  // Show camera and start recording
-  cameraWindow.show();
-  
-  // First update camera to selected one
-  cameraWindow.webContents.send('start-camera', {
-    cameraId: data.cameraId
-  });
-  
-  // Then start the recording process
-  setTimeout(() => {
-    cameraWindow.webContents.send('start-recording', {
-      windowId: data.windowId,
-      cameraId: data.cameraId,
-      micId: data.micId
-    });
-  }, 500); // Small delay to ensure camera is ready
+function moveCameraToRecordingArea(bounds) {
+  if (cameraWindow && !cameraWindow.isDestroyed()) {
+    const camBounds = cameraWindow.getBounds();
+    const cameraSize = Math.min(camBounds.width, camBounds.height);
+    const margin = 20;
+    const cameraX = bounds.x + bounds.width - cameraSize - margin;
+    const cameraY = bounds.y + bounds.height - cameraSize - margin;
+    cameraWindow.setBounds({ x: cameraX, y: cameraY, width: cameraSize, height: cameraSize });
+    cameraWindow.show();
+  } else {
+    console.log('Camera window not available to move');
+  }
 }
+
+function startScreenRecording(data) {
+  console.log('Starting screen recording with data:', data);
+  recordingData = data;
+  isRecording = true;
+  
+  // Recording window should already exist and be positioned from window selection
+  if (!recordingWindow || recordingWindow.isDestroyed()) {
+    console.log('Error: Recording window should already exist when starting recording');
+    return;
+  }
+  
+  // Just send the start recording command - outline should already be positioned
+  console.log('Sending start recording command to existing positioned window');
+  recordingWindow.webContents.send('start-recording', data);
+  
+  // Update controls UI to show recording state
+  if (controlsWindow && !controlsWindow.isDestroyed()) {
+    controlsWindow.webContents.send('recording-state-changed', { isRecording: true });
+  }
+  
+  console.log('Screen recording started');
+}
+
+function startRecording(data) {
+  console.log('Starting recording with data:', data);
+  startScreenRecording(data);
+}
+
+// Removed getWindowBounds and startAreaRecordingProcess - no longer needed
 
 function stopRecording() {
   console.log('Stopping recording...');
   
-  if (cameraWindow && !cameraWindow.isDestroyed()) {
-    // Ensure the camera window is visible and can receive events
-    if (!cameraWindow.isVisible()) {
-      cameraWindow.show();
+  if (isRecording) {
+    // Send stop command to recording window
+    if (recordingWindow && !recordingWindow.isDestroyed()) {
+      recordingWindow.webContents.send('stop-recording');
     }
     
-    // Send stop recording command to camera window
-    console.log('Sending stop-recording command to camera window');
-    cameraWindow.webContents.send('stop-recording');
-    
-    // Set a timeout in case the camera doesn't respond
-    setTimeout(() => {
-      if (isRecording) {
-        console.log('Recording stop timeout - forcing stop');
-        isRecording = false;
-        recordingData = null;
-        
-        // Hide camera window
-        if (cameraWindow && !cameraWindow.isDestroyed()) {
-          cameraWindow.hide();
-        }
-        
-        // Update controls UI to show stopped state
-        if (controlsWindow && !controlsWindow.isDestroyed()) {
-          controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
-        }
-      }
-    }, 10000); // 10 second timeout
-    
-    // Don't hide camera window immediately - let the recording-stopped event handle cleanup
-  } else {
-    console.log('No camera window to stop recording on');
-    // If no camera window, update state immediately
     isRecording = false;
     recordingData = null;
     
@@ -433,7 +582,16 @@ function stopRecording() {
     if (controlsWindow && !controlsWindow.isDestroyed()) {
       controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
     }
+    
+    console.log('Recording stopped');
   }
+}
+
+// Request macOS accessibility permission (no-op on Windows)
+try {
+  windowManager.requestAccessibility && windowManager.requestAccessibility();
+} catch (err) {
+  console.warn('windowManager accessibility request failed:', err?.message);
 }
 
 app.whenReady().then(() => {
@@ -466,5 +624,8 @@ app.on('before-quit', () => {
   }
   if (cameraWindow) {
     cameraWindow.destroy();
+  }
+  if (recordingWindow) {
+    recordingWindow.destroy();
   }
 });

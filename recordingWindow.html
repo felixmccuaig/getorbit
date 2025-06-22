@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Recording Window</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: transparent;
+            overflow: hidden;
+        }
+        
+        #recording-area {
+            position: absolute;
+            border: 3px dashed #ff4444;
+            border-radius: 8px;
+            background: transparent;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.3);
+            cursor: move;
+            min-width: 200px;
+            min-height: 150px;
+        }
+        
+        .resize-handle {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: #ff4444;
+            border: 1px solid white;
+            border-radius: 50%;
+            z-index: 1001;
+        }
+        
+        .resize-handle.top-left { top: -5px; left: -5px; cursor: nw-resize; }
+        .resize-handle.top-right { top: -5px; right: -5px; cursor: ne-resize; }
+        .resize-handle.bottom-left { bottom: -5px; left: -5px; cursor: sw-resize; }
+        .resize-handle.bottom-right { bottom: -5px; right: -5px; cursor: se-resize; }
+        
+        #instructions {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none;
+            z-index: 1002;
+            text-align: center;
+        }
+        
+        /* Removed camera overlay - using existing camera window instead */
+        
+        #recording-indicator {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 12px;
+            height: 12px;
+            background: #ff4444;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+            z-index: 1000;
+            display: none;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.3; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div id="recording-area">
+        <div class="resize-handle top-left"></div>
+        <div class="resize-handle top-right"></div>
+        <div class="resize-handle bottom-left"></div>
+        <div class="resize-handle bottom-right"></div>
+        <div id="instructions">Drag to move • Drag corners to resize</div>
+    </div>
+    <div id="recording-indicator"></div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+        const { dialog } = require('@electron/remote');
+        const { writeFile } = require('fs');
+        
+        const recordingArea = document.getElementById('recording-area');
+        const recordingIndicator = document.getElementById('recording-indicator');
+        
+        let screenStream = null;
+        let micStream = null;
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let isRecording = false;
+        let recordingBounds = null;
+        
+        // Add a startup log
+        console.log('Recording window loaded and ready');
+        
+        let isDragging = false;
+        let isResizing = false;
+        let dragOffset = { x: 0, y: 0 };
+        let resizeHandle = null;
+        let initialBounds = null;
+        
+        // Position recording area
+        ipcRenderer.on('position-recording-area', (event, bounds) => {
+            console.log('Recording window: Positioning recording area:', bounds);
+            recordingBounds = bounds;
+            
+            recordingArea.style.left = bounds.x + 'px';
+            recordingArea.style.top = bounds.y + 'px';
+            recordingArea.style.width = bounds.width + 'px';
+            recordingArea.style.height = bounds.height + 'px';
+            
+            console.log('Recording area positioned and visible');
+        });
+        
+        // Make recording area draggable
+        recordingArea.addEventListener('mousedown', (e) => {
+            if (e.target.classList.contains('resize-handle')) {
+                // Start resizing
+                isResizing = true;
+                resizeHandle = e.target;
+                initialBounds = recordingArea.getBoundingClientRect();
+                e.preventDefault();
+            } else if (e.target === recordingArea || e.target.id === 'instructions') {
+                // Start dragging
+                isDragging = true;
+                const rect = recordingArea.getBoundingClientRect();
+                dragOffset.x = e.clientX - rect.left;
+                dragOffset.y = e.clientY - rect.top;
+                e.preventDefault();
+            }
+        });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const newX = e.clientX - dragOffset.x;
+                const newY = e.clientY - dragOffset.y;
+                recordingArea.style.left = newX + 'px';
+                recordingArea.style.top = newY + 'px';
+                
+                // Update stored bounds
+                recordingBounds = {
+                    x: newX,
+                    y: newY,
+                    width: parseInt(recordingArea.style.width),
+                    height: parseInt(recordingArea.style.height)
+                };
+                
+                // Move camera with recording area
+                updateCameraPosition();
+            } else if (isResizing && resizeHandle) {
+                const rect = recordingArea.getBoundingClientRect();
+                let newWidth = rect.width;
+                let newHeight = rect.height;
+                let newX = rect.left;
+                let newY = rect.top;
+                
+                if (resizeHandle.classList.contains('bottom-right')) {
+                    newWidth = e.clientX - rect.left;
+                    newHeight = e.clientY - rect.top;
+                } else if (resizeHandle.classList.contains('bottom-left')) {
+                    newWidth = rect.right - e.clientX;
+                    newHeight = e.clientY - rect.top;
+                    newX = e.clientX;
+                } else if (resizeHandle.classList.contains('top-right')) {
+                    newWidth = e.clientX - rect.left;
+                    newHeight = rect.bottom - e.clientY;
+                    newY = e.clientY;
+                } else if (resizeHandle.classList.contains('top-left')) {
+                    newWidth = rect.right - e.clientX;
+                    newHeight = rect.bottom - e.clientY;
+                    newX = e.clientX;
+                    newY = e.clientY;
+                }
+                
+                // Apply minimum size constraints
+                newWidth = Math.max(200, newWidth);
+                newHeight = Math.max(150, newHeight);
+                
+                recordingArea.style.left = newX + 'px';
+                recordingArea.style.top = newY + 'px';
+                recordingArea.style.width = newWidth + 'px';
+                recordingArea.style.height = newHeight + 'px';
+                
+                // Update stored bounds
+                recordingBounds = {
+                    x: newX,
+                    y: newY,
+                    width: newWidth,
+                    height: newHeight
+                };
+                
+                // Move camera with recording area
+                updateCameraPosition();
+            }
+        });
+        
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+            isResizing = false;
+            resizeHandle = null;
+            initialBounds = null;
+        });
+        
+        function updateCameraPosition() {
+            // Notify main process to move camera window
+            if (recordingBounds) {
+                ipcRenderer.send('update-camera-position', recordingBounds);
+            }
+        }
+        
+        // Show outline only (when window is selected)
+        ipcRenderer.on('show-outline-only', () => {
+            console.log('Showing outline only - window selected');
+            // Just show the border, don't start recording yet
+        });
+        
+        // Start recording
+        ipcRenderer.on('start-recording', async (event, data) => {
+            console.log('Starting recording with data:', data);
+            await startRecording(data);
+        });
+        
+        // Stop recording  
+        ipcRenderer.on('stop-recording', async () => {
+            console.log('Stopping recording');
+            await stopRecording();
+        });
+        
+        async function startRecording(data) {
+            try {
+                console.log('Recording window: Starting recording with data:', data);
+                console.log('Recording bounds:', recordingBounds);
+                
+                recordingIndicator.style.display = 'block';
+                isRecording = true;
+                recordedChunks = [];
+                
+                // Get microphone stream
+                console.log('Getting microphone stream...');
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { 
+                        deviceId: data.micId === 'default' ? 'default' : { exact: data.micId }
+                    }
+                });
+                console.log('Microphone stream obtained');
+                
+                // Get screen recording with minimal constraints
+                console.log('Getting screen recording...');
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: true,
+                    audio: false // We'll use mic stream for audio
+                });
+                
+                console.log('Screen stream obtained');
+                
+                // Combine video and audio streams  
+                const videoTracks = screenStream.getVideoTracks();
+                const audioTracks = micStream.getAudioTracks();
+                console.log('Video tracks:', videoTracks.length, 'Audio tracks:', audioTracks.length);
+                
+                const combinedStream = new MediaStream([
+                    ...videoTracks,
+                    ...audioTracks
+                ]);
+                
+                // Set up MediaRecorder
+                const options = {
+                    mimeType: 'video/webm; codecs=vp9',
+                    videoBitsPerSecond: 8000000,
+                    audioBitsPerSecond: 128000
+                };
+                
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options.mimeType = 'video/webm; codecs=vp8';
+                    options.videoBitsPerSecond = 5000000;
+                }
+                
+                mediaRecorder = new MediaRecorder(combinedStream, options);
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                        console.log('Recorded chunk:', event.data.size, 'bytes');
+                    }
+                };
+                
+                mediaRecorder.onstop = async () => {
+                    console.log('Recording stopped, saving...');
+                    await saveRecording();
+                };
+                
+                mediaRecorder.onerror = (event) => {
+                    console.error('MediaRecorder error:', event.error);
+                };
+                
+                mediaRecorder.start(100);
+                console.log('Recording started');
+                ipcRenderer.send('recording-started');
+                
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                recordingIndicator.style.display = 'none';
+                isRecording = false;
+                ipcRenderer.send('recording-error', error.message);
+            }
+        }
+        
+        async function stopRecording() {
+            if (!isRecording || !mediaRecorder) {
+                return;
+            }
+            
+            recordingIndicator.style.display = 'none';
+            isRecording = false;
+            
+            if (mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+            }
+            
+            cleanupStreams();
+        }
+        
+        function cleanupStreams() {
+            console.log('Cleaning up streams...');
+            
+            if (screenStream) {
+                screenStream.getTracks().forEach(track => track.stop());
+                screenStream = null;
+            }
+            
+            if (micStream) {
+                micStream.getTracks().forEach(track => track.stop());
+                micStream = null;
+            }
+        }
+        
+        async function saveRecording() {
+            if (recordedChunks.length === 0) {
+                console.error('No recording data to save');
+                return;
+            }
+            
+            console.log('Creating video blob from', recordedChunks.length, 'chunks');
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            console.log('Video blob size:', blob.size, 'bytes');
+            
+            try {
+                const result = await dialog.showSaveDialog({
+                    buttonLabel: 'Save Video',
+                    defaultPath: `screen-recording-${Date.now()}.webm`,
+                    filters: [
+                        { name: 'WebM Videos', extensions: ['webm'] },
+                        { name: 'All Files', extensions: ['*'] }
+                    ]
+                });
+                
+                if (!result.canceled && result.filePath) {
+                    console.log('Saving video to:', result.filePath);
+                    const buffer = Buffer.from(await blob.arrayBuffer());
+                    
+                    writeFile(result.filePath, buffer, (err) => {
+                        if (err) {
+                            console.error('Error saving file:', err);
+                        } else {
+                            console.log('Video saved successfully to:', result.filePath);
+                            ipcRenderer.send('recording-saved', result.filePath);
+                        }
+                    });
+                } else {
+                    console.log('Save dialog was canceled');
+                }
+            } catch (error) {
+                console.error('Error saving recording:', error);
+            }
+            
+            ipcRenderer.send('recording-stopped');
+        }
+    </script>
+</body>
+</html> 

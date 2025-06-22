@@ -479,6 +479,8 @@
             isProcessing = true;
             
             console.log('Processing recording...');
+            console.log('Screen chunks:', screenChunks.length);
+            console.log('Camera chunks:', cameraChunks.length);
             
             if (screenChunks.length === 0) {
                 console.error('No screen recording data');
@@ -493,14 +495,19 @@
                 return;
             }
             
+            console.log('Starting video composition...');
             await compositeVideos();
             isProcessing = false;
         }
 
         async function compositeVideos() {
             try {
+                console.log('Creating blobs from chunks...');
                 const screenBlob = new Blob(screenChunks, { type: 'video/webm' });
                 const cameraBlob = new Blob(cameraChunks, { type: 'video/webm' });
+                
+                console.log('Screen blob size:', screenBlob.size, 'bytes');
+                console.log('Camera blob size:', cameraBlob.size, 'bytes');
                 
                 const screenVideo = document.createElement('video');
                 const cameraVideo = document.createElement('video');
@@ -508,10 +515,14 @@
                 screenVideo.src = URL.createObjectURL(screenBlob);
                 cameraVideo.src = URL.createObjectURL(cameraBlob);
                 
+                console.log('Loading video metadata...');
                 await Promise.all([
                     new Promise(r => { screenVideo.onloadedmetadata = r; screenVideo.load(); }),
                     new Promise(r => { cameraVideo.onloadedmetadata = r; cameraVideo.load(); })
                 ]);
+
+                console.log('Screen video dimensions:', screenVideo.videoWidth, 'x', screenVideo.videoHeight);
+                console.log('Camera video dimensions:', cameraVideo.videoWidth, 'x', cameraVideo.videoHeight);
 
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
@@ -523,26 +534,33 @@
                 const cameraX = canvas.width - cameraSize - margin;
                 const cameraY = canvas.height - cameraSize - margin;
                 
+                console.log('Starting compositing process...');
                 await startCompositing(screenVideo, cameraVideo, canvas, ctx, cameraX, cameraY, cameraSize);
                 
                 URL.revokeObjectURL(screenVideo.src);
                 URL.revokeObjectURL(cameraVideo.src);
+                console.log('Video compositing completed');
                 
             } catch (error) {
                 console.error('Error in compositeVideos:', error);
+                console.log('Falling back to separate screen and camera recordings...');
                 await saveScreenRecording();
                 await saveCameraRecording();
             }
         }
 
         async function startCompositing(screenVideo, cameraVideo, canvas, ctx, cameraX, cameraY, cameraSize) {
+            console.log('Setting up canvas stream...');
             const canvasStream = canvas.captureStream(30);
+            
+            console.log('Setting up audio context...');
             const audioContext = new AudioContext();
             const screenAudioSource = audioContext.createMediaElementSource(screenVideo);
             const destination = audioContext.createMediaStreamDestination();
             screenAudioSource.connect(destination);
             
             const combinedStream = new MediaStream([canvasStream.getVideoTracks()[0], destination.stream.getAudioTracks()[0]]);
+            console.log('Combined stream tracks:', combinedStream.getTracks().length);
             
             const compositeChunks = [];
             const recorderOptions = { mimeType: 'video/webm; codecs=vp9', videoBitsPerSecond: 8000000 };
@@ -551,21 +569,35 @@
                 recorderOptions.videoBitsPerSecond = 5000000;
             }
             
+            console.log('Using recorder options:', recorderOptions);
             const compositeRecorder = new MediaRecorder(combinedStream, recorderOptions);
-            compositeRecorder.ondataavailable = e => { if (e.data.size > 0) compositeChunks.push(e.data); };
+            
+            compositeRecorder.ondataavailable = e => { 
+                if (e.data.size > 0) {
+                    compositeChunks.push(e.data);
+                    console.log('Composite chunk received, size:', e.data.size, 'total chunks:', compositeChunks.length);
+                }
+            };
+            
             compositeRecorder.onstop = async () => {
+                console.log('Composite recorder stopped, total chunks:', compositeChunks.length);
                 await saveCompositeVideo(compositeChunks);
                 audioContext.close();
             };
             
-            compositeRecorder.start();
+            console.log('Starting composite recorder...');
+            compositeRecorder.start(100); // Record in 100ms chunks
             
             screenVideo.currentTime = 0;
             cameraVideo.currentTime = 0;
+            
+            console.log('Starting video playback...');
             await screenVideo.play();
             await cameraVideo.play();
             
             const duration = Math.min(screenVideo.duration, cameraVideo.duration);
+            console.log('Video duration:', duration, 'seconds');
+            
             drawCompositeFrame(screenVideo, cameraVideo, ctx, canvas, cameraX, cameraY, cameraSize, compositeRecorder, duration);
         }
 
@@ -612,21 +644,39 @@
         }
 
         async function saveCompositeVideo(chunks) {
+            console.log('saveCompositeVideo called with', chunks.length, 'chunks');
             if (chunks.length === 0) return console.error('No composite video data to save');
             
+            console.log('Creating composite video blob...');
             const blob = new Blob(chunks, { type: 'video/webm' });
-            const buffer = Buffer.from(await blob.arrayBuffer());
+            console.log('Composite video blob size:', blob.size, 'bytes');
             
-            const { filePath } = await dialog.showSaveDialog({
+            const buffer = Buffer.from(await blob.arrayBuffer());
+            console.log('Composite video buffer size:', buffer.length, 'bytes');
+            
+            console.log('Showing save dialog...');
+            const result = await dialog.showSaveDialog({
                 buttonLabel: 'Save Composite Video',
-                defaultPath: `orbit-composite-${Date.now()}.webm`
+                defaultPath: `orbit-composite-${Date.now()}.webm`,
+                filters: [
+                    { name: 'WebM Videos', extensions: ['webm'] }
+                ]
             });
             
-            if (filePath) {
-                writeFile(filePath, buffer, (err) => {
-                    if (err) console.error('Error saving composite video:', err);
-                    else console.log('🎉 Recording complete! Your video includes the camera bubble overlay.');
+            console.log('Save dialog result:', result);
+            
+            if (result.filePath) {
+                console.log('Saving to:', result.filePath);
+                writeFile(result.filePath, buffer, (err) => {
+                    if (err) {
+                        console.error('Error saving composite video:', err);
+                    } else {
+                        console.log('🎉 Recording complete! Your video includes the camera bubble overlay.');
+                        console.log('Saved to:', result.filePath);
+                    }
                 });
+            } else {
+                console.log('User cancelled save dialog');
             }
         }
 

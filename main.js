@@ -102,11 +102,21 @@ ipcMain.on('recording-started', () => {
 });
 
 ipcMain.on('recording-stopped', () => {
+  console.log('Recording stopped event received from camera');
   isRecording = false;
+  recordingData = null;
+  
+  // Hide camera window after recording stops
+  if (cameraWindow && !cameraWindow.isDestroyed()) {
+    cameraWindow.hide();
+  }
+  
   // Update controls UI to show stopped state
   if (controlsWindow && !controlsWindow.isDestroyed()) {
     controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
   }
+  
+  console.log('Recording stopped and cleaned up');
 });
 
 function createTray() {
@@ -382,23 +392,48 @@ function startRecordingProcess(data) {
 
 function stopRecording() {
   console.log('Stopping recording...');
-  isRecording = false;
   
   if (cameraWindow && !cameraWindow.isDestroyed()) {
+    // Ensure the camera window is visible and can receive events
+    if (!cameraWindow.isVisible()) {
+      cameraWindow.show();
+    }
+    
     // Send stop recording command to camera window
+    console.log('Sending stop-recording command to camera window');
     cameraWindow.webContents.send('stop-recording');
     
-    // Hide camera window after recording stops
-    cameraWindow.hide();
+    // Set a timeout in case the camera doesn't respond
+    setTimeout(() => {
+      if (isRecording) {
+        console.log('Recording stop timeout - forcing stop');
+        isRecording = false;
+        recordingData = null;
+        
+        // Hide camera window
+        if (cameraWindow && !cameraWindow.isDestroyed()) {
+          cameraWindow.hide();
+        }
+        
+        // Update controls UI to show stopped state
+        if (controlsWindow && !controlsWindow.isDestroyed()) {
+          controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
+        }
+      }
+    }, 10000); // 10 second timeout
+    
+    // Don't hide camera window immediately - let the recording-stopped event handle cleanup
+  } else {
+    console.log('No camera window to stop recording on');
+    // If no camera window, update state immediately
+    isRecording = false;
+    recordingData = null;
+    
+    // Update controls UI to show stopped state
+    if (controlsWindow && !controlsWindow.isDestroyed()) {
+      controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
+    }
   }
-  
-  // Update controls UI to show stopped state
-  if (controlsWindow && !controlsWindow.isDestroyed()) {
-    controlsWindow.webContents.send('recording-state-changed', { isRecording: false });
-  }
-  
-  recordingData = null;
-  console.log('Recording stopped and cleaned up');
 }
 
 app.whenReady().then(() => {
